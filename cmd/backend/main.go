@@ -4,44 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5"
+	"github.com/okharch/pixel-tracker/db"
 	"github.com/okharch/pixel-tracker/events"
 	"github.com/okharch/pixel-tracker/model"
 	"github.com/okharch/pixel-tracker/users"
 	"log"
 	"net/http"
-	"os"
 	"time"
 )
 
-func MustConnect() *pgx.Conn {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		url = "postgres://postgres:postgres@localhost:5432/pixel_tracker"
-	}
-
-	conn, err := pgx.Connect(context.Background(), url)
-	if err != nil {
-		log.Fatal("Unable to connect to database:", err)
-	}
-
-	return conn
-}
-func CopyWorker(ctx context.Context, db *pgx.Conn, userManager *users.UserManager) {
-	ticker := time.NewTicker(1000 * time.Millisecond)
-	for range ticker.C {
-		events.FlushEvents(ctx, db, userManager)
-	}
-}
-
 func main() {
-	db := MustConnect()
-	ctx := context.Background()
-	userManager, err := users.NewUserManager(ctx, db)
+	ctx := context.TODO()
+	umDb := db.MustConnect(ctx) // Initialize the database connection
+	evDb := db.MustConnect(ctx) // Create a separate connection for event processing
+	userManager, err := users.NewUserManager(ctx, umDb)
 	if err != nil {
 		log.Fatalf("Failed to initialize user manager: %v", err)
 	}
-	go CopyWorker(ctx, db, userManager)
+	go events.CopyWorker(ctx, evDb, userManager, time.Second) // Start the event flushing worker
 
 	r := chi.NewRouter()
 	r.Post("/track", func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +34,7 @@ func main() {
 			http.Error(w, "no events provided", http.StatusBadRequest)
 			return
 		}
-		events.AddEvents(rawEvents, userManager) // Assumes `AddEvents` is globally accessible
+		events.AddEvents(ctx, evDb, rawEvents, userManager) // Assumes `AddEvents` is globally accessible
 		w.WriteHeader(http.StatusNoContent)
 	})
 

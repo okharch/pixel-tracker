@@ -1,7 +1,6 @@
 package events
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"github.com/jackc/pgx/v5"
@@ -11,60 +10,72 @@ import (
 	"sync"
 )
 
-var mu sync.Mutex
 var pool *sync.Pool
+var rowsMu sync.Mutex
+var curRow int
+var rows [][]interface{}
 
 func init() {
 	pool = &sync.Pool{
 		New: func() interface{} {
-			return &bytes.Buffer{}
+			return make([][]interface{}, 8*1024*1024)
 		},
 	}
-	eventBuffer = pool.Get().(*bytes.Buffer)
+	rows = pool.Get().([][]interface{})
 }
 
-var eventBuffer *bytes.Buffer
-
-func AddEvents(events []model.TrackEvent, um *users.UserManager) error {
-	if len(events) == 0 {
-		return nil
-	}
-	// Convert events to TrackEventU
-	converted := make([]model.TrackEventU, len(events))
+func AddEvents(ctx context.Context, db *pgx.Conn, events []model.TrackEvent, um *users.UserManager) {
+	eventsU := make([]model.TrackEventU, len(events))
 	for i, e := range events {
-		converted[i].UserId = um.AddUser(e.EmailHash)
-		converted[i].EventHash = e.EventHash
+		eventsU[i].UserId = um.AddUser(e.EmailHash)
+		eventsU[i].EventHash = e.EventHash
 	}
-	mu.Lock()
-	for i := 0; i < len(converted); i++ {
-		eventBuffer.WriteString(fmt.Sprintf("%d\t%s\n",
-			converted[i].UserId,
-			converted[i].EventHash,
-		))
+	rowsMu.Lock()
+	for _, e := range eventsU {
+		rows[curRow] = []interface{}{e.UserId, e.EventHash}
+		curRow++
+		if curRow == len(rows) {
+			err := FlushEvents(ctx, db, um, false)
+			if err != nil {
+				log.Printf("flush events: %w", err)
+			}
+		}
 	}
-	mu.Unlock()
-	return nil
+	rowsMu.Unlock()
 }
 
-func FlushEvents(ctx context.Context, db *pgx.Conn, userManager *users.UserManager) {
-	// before flushing events, we need to ensure that all users are preloaded
+var flushMu sync.Mutex
+
+func FlushEvents(ctx context.Context, db *pgx.Conn, userManager *users.UserManager, lockRows bool) error {
+	flushMu.Lock()
+	defer flushMu.Unlock()
 	if err := userManager.FlushUsers(ctx); err != nil {
-		log.Fatalf("Failed to flush users: %v", err)
+		return fmt.Errorf("flush users: %w", err)
 	}
-	mu.Lock()
-	flush := eventBuffer
-	eventBuffer = pool.Get().(*bytes.Buffer)
-	mu.Unlock()
-
-	_, err := db.PgConn().CopyFrom(
+	if lockRows {
+		rowsMu.Lock()
+	}
+	cur := curRow
+	curRow = 0
+	flush := rows
+	if cur != 0 {
+		rows = pool.Get().([][]interface{})
+	}
+	if lockRows {
+		rowsMu.Unlock()
+	}
+	if cur == 0 {
+		return nil // nothing to flush
+	}
+	_, err := db.CopyFrom(
 		ctx,
-		flush,
-		`COPY track_events (user_id, event_hash) FROM STDIN`,
+		pgx.Identifier{"track_events"},
+		[]string{"user_id", "event_hash"},
+		pgx.CopyFromRows(flush[:cur]),
 	)
-	flush.Reset()   // Reset the buffer for reuse
-	pool.Put(flush) // Return buffer to pool
-
 	if err != nil {
-		fmt.Println("COPY error:", err)
+		return fmt.Errorf("copy from track_events: %w", err)
 	}
+	pool.Put(flush)
+	return err
 }

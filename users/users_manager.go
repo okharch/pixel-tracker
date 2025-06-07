@@ -13,6 +13,7 @@ import (
 
 type UserManager struct {
 	mu       sync.Mutex
+	flushMu  sync.Mutex
 	existing sync.Map      // map[int64]struct{}
 	newUsers *bytes.Buffer // Buffer to hold new users before flushing
 	db       *pgx.Conn
@@ -87,6 +88,8 @@ func (um *UserManager) FlushUsers(ctx context.Context) error {
 	um.mu.Unlock()
 
 	// COPY into users_staging
+	um.flushMu.Lock()
+	defer um.flushMu.Unlock()
 	_, err := um.db.PgConn().CopyFrom(
 		ctx,
 		flushBuffer,
