@@ -35,11 +35,11 @@ var client = &http.Client{
 }
 
 func init() {
-	flag.StringVar(&backendURL, "url", "http://localhost:8080/track", "Backend URL to send track events to")
+	flag.StringVar(&backendURL, "url", "http://backend:8080/track", "Backend URL to send track events to")
 	flag.IntVar(&totalUsers, "users", 1000000, "Total number of unique users to simulate")
-	flag.IntVar(&batchSize, "batch-size", 1, "Number of events to send in each batch request")
+	flag.IntVar(&batchSize, "batch-size", 10, "Number of events to send in each batch request")
 	flag.IntVar(&workers, "workers", 100, "Number of concurrent workers to generate and send events")
-	flag.IntVar(&events, "events", 1000000, "Total number of events to generate")
+	flag.IntVar(&events, "events", 3000000, "Total number of events to generate")
 }
 
 func main() {
@@ -51,7 +51,13 @@ func main() {
 		log.Fatal("Calculated 'requests' is zero. Ensure 'events' is greater than or equal to 'batch-size'.")
 	}
 
-	rand.Seed(time.Now().UnixNano())
+	if resetTrackEvents() {
+		log.Println("Track events table reset successfully.")
+	} else {
+		log.Println("Failed to reset track events table. Continuing with existing data.")
+		return
+	}
+
 	wg := sync.WaitGroup{}
 
 	log.Printf("Starting load generation with parameters:\n")
@@ -61,37 +67,33 @@ func main() {
 	log.Printf("  Workers: %d\n", workers)
 	log.Printf("  Total Events: %d\n", events)
 	log.Printf("  Total Requests: %d\n", requests)
+	started := time.Now()
+	wg.Add(workers)
 
-	for {
-		wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(workerID int) {
+			defer wg.Done()
+			eventsPerWorker := requests / workers
+			if requests%workers != 0 && workerID == workers-1 { // Distribute remainder to the last worker
+				eventsPerWorker += requests % workers
+			}
 
-		for w := 0; w < workers; w++ {
-			go func(workerID int) {
-				defer wg.Done()
-				eventsPerWorker := requests / workers
-				if requests%workers != 0 && workerID == workers-1 { // Distribute remainder to the last worker
-					eventsPerWorker += requests % workers
-				}
-
-				for i := 0; i < eventsPerWorker; i++ {
-					batch := make([]TrackEvent, batchSize)
-					for j := range batch {
-						userID := rand.Intn(totalUsers)
-						batch[j] = TrackEvent{
-							EmailHash: fmt.Sprintf("user-%d@example.com", userID),
-							EventHash: fmt.Sprintf("event-%d-%d", userID, rand.Int63()),
-						}
+			for i := 0; i < eventsPerWorker; i++ {
+				batch := make([]TrackEvent, batchSize)
+				for j := range batch {
+					userID := rand.Intn(totalUsers)
+					batch[j] = TrackEvent{
+						EmailHash: fmt.Sprintf("user-%d@example.com", userID),
+						EventHash: fmt.Sprintf("event-%d-%d", userID, rand.Int63()),
 					}
-					sendBatch(batch)
 				}
-			}(w)
-		}
-
-		wg.Wait()
-		log.Println("Load generation complete. Restarting for continuous load...")
-		// Optional: Add a sleep here if you don't want it to restart immediately
-		// time.Sleep(5 * time.Second)
+				sendBatch(batch)
+			}
+		}(w)
 	}
+
+	wg.Wait()
+	log.Println("Load generation complete in ", time.Since(started))
 }
 
 func sendBatch(events []TrackEvent) {
@@ -114,4 +116,22 @@ func sendBatch(events []TrackEvent) {
 	if resp.StatusCode != http.StatusNoContent {
 		fmt.Println("unexpected status:", resp.Status)
 	}
+}
+
+func resetTrackEvents() (success bool) {
+	req, err := http.NewRequest("POST", "http://backend:8080/reset", nil)
+	if err != nil {
+		fmt.Println("reset request error:", err)
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("reset HTTP error:", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("reset failed, status:", resp.Status)
+	}
+	return true
 }

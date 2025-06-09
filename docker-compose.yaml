@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:17
+    container_name: pixel_db
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust  # disables password
+    command: postgres -c max_wal_size=2GB -c checkpoint_timeout=10min
+    volumes:
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    image: golang:1.24
+    container_name: pixel_backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres@db:5432/postgres?sslmode=disable
+    command: ["/bin/sh", "-c", "go run cmd/backend/main.go"]
+    working_dir: /app
+    volumes:
+      - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  benchmark:
+    image: golang:1.24
+    container_name: pixel_benchmark
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres@db:5432/postgres?sslmode=disable
+    command: ["sh", "scripts/run-benchmarks.sh"]
+
+    working_dir: /app
+    volumes:
+      - .:/app

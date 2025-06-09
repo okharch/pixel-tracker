@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/okharch/pixel-tracker/db"
 	"github.com/okharch/pixel-tracker/events"
 	"github.com/okharch/pixel-tracker/model"
 	"github.com/okharch/pixel-tracker/users"
 	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -24,6 +26,10 @@ func main() {
 	go events.CopyWorker(ctx, evDb, userManager, time.Second) // Start the event flushing worker
 
 	r := chi.NewRouter()
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 	r.Post("/track", func(w http.ResponseWriter, r *http.Request) {
 		var rawEvents []model.TrackEvent
 		if err := json.NewDecoder(r.Body).Decode(&rawEvents); err != nil {
@@ -37,7 +43,23 @@ func main() {
 		events.AddEvents(ctx, evDb, rawEvents, userManager) // Assumes `AddEvents` is globally accessible
 		w.WriteHeader(http.StatusNoContent)
 	})
+	dbUrl := os.Getenv("DATABASE_URL")
+	r.Post("/reset", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := pgx.Connect(ctx, dbUrl)
+		if err != nil {
+			http.Error(w, "failed to connect", http.StatusInternalServerError)
+			return
+		}
+		defer conn.Close(ctx)
 
+		_, err = conn.Exec(ctx, "TRUNCATE TABLE track_events")
+		if err != nil {
+			http.Error(w, "failed to truncate", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("track_events table truncated"))
+	})
 	log.Println("Listening on :8080")
 	http.ListenAndServe(":8080", r)
 }
